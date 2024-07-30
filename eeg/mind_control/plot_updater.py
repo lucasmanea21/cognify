@@ -5,6 +5,7 @@ from .action_performer import perform_action
 predictions = ["mouse up", "mouse down", "mouse left", "mouse right", "click"]
 predicted_action = "none"
 
+
 def init_plot(axs, x, y):
     lines = [ax.plot(x, y[i])[0] for i, ax in enumerate(axs[:4])]
     
@@ -17,20 +18,28 @@ def init_plot(axs, x, y):
 
 # simulates model predictions
 # todo: replace with actual model
-def simulate_prediction():
-    global predicted_action
+def simulate_prediction(predicted_action):
+    action = random.choice(predictions)
+    print(f"Predicted action: {action}")
+    predicted_action[0] = action  
     
-    predicted_action = random.choice(predictions)
-    print(f"Predicted action: {predicted_action}")
-    perform_action(predicted_action)
+    perform_action(action)
+    
+def get_smoothed_prediction():
+    if not prediction_buffer:
+        return "none"
+    
+    # use the most frequent prediction in the buffer
+    smoothed_action = max(set(prediction_buffer), key=prediction_buffer.count)
+    return smoothed_action
 
-def update_plot(frame, lines, prediction_text, y):
+
+def update_plot(frame, lines, prediction_text, y, predicted_action):
     for i, line in enumerate(lines):
         line.set_ydata(y[i])
-        
-    prediction_text.set_text(f"Prediction: {predicted_action}")
+    prediction_text.set_text(f"Prediction: {predicted_action[0]}") 
+    
     return lines + [prediction_text]
 
-def get_current_prediction():
-    global predicted_action
-    return predicted_action
+def get_current_prediction(predicted_action):
+    return predicted_action[0]

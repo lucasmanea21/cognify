@@ -8,7 +8,8 @@ import time
 import os
 import matplotlib.pyplot as plt
 from datetime import datetime
-
+from collections import deque
+import threading
 
 root = tk.Tk()
 root.title("EEG Data Recorder")
@@ -27,14 +28,24 @@ start_time = None
 show_plot = False
 trial_index = 0
 saved_trials = []
+data_buffer = deque(maxlen=sampling_rate * 10)  
+data_lock = threading.Lock()
+plot_fig, plot_ax = None, None
 
 def load_board():
     global board
-    params = BrainFlowInputParams()
-    board_id = BoardIds.SYNTHETIC_BOARD
-    board = BoardShim(board_id, params)
-    board.prepare_session()
-    board.start_stream()
+    if board is None:
+        params = BrainFlowInputParams()
+        board_id = BoardIds.SYNTHETIC_BOARD
+        # params.serial_port = "/dev/cu.usbserial-D200PPDD"
+        try:
+            board = BoardShim(board_id, params)
+            board.prepare_session()
+            board.start_stream()
+            print("Board loaded and streaming started.")
+        except Exception as e:
+            messagebox.showerror("Connection Error", f"Failed to load the board: {e}")
+            print(f"Failed to load the board: {e}")
 
 def start_recording():
     global board, recording, data, start_time
@@ -51,46 +62,54 @@ def start_recording():
     stop_button.config(state=tk.NORMAL)
     recording = True
     start_time = time.time()
-    update_phase()
-    record_task()
+    threading.Thread(target=update_phase, daemon=True).start()
+    threading.Thread(target=record_task, daemon=True).start()
 
 def update_phase():
     global current_phase, start_time
-    elapsed_time = time.time() - start_time
-    if current_phase == "thinking" and elapsed_time >= think_time:
-        save_data()
-        current_phase = "resting"
-        start_time = time.time()
-        phase_label.config(text="Resting... Please relax.")
-    elif current_phase == "resting" and elapsed_time >= rest_time:
-        current_phase = "thinking"
-        start_time = time.time()
-        phase_label.config(text="Recording... Please focus on the task.")
-    update_animation()
-    root.after(1000, update_phase)
+    while recording:
+        elapsed_time = time.time() - start_time
+        if current_phase == "thinking" and elapsed_time >= think_time:
+            root.after(0, save_data)
+            current_phase = "resting"
+            start_time = time.time()
+            root.after(0, lambda: phase_label.config(text="Resting... Please relax."))
+        elif current_phase == "resting" and elapsed_time >= rest_time:
+            current_phase = "thinking"
+            start_time = time.time()
+            root.after(0, lambda: phase_label.config(text="Recording... Please focus on the task."))
+        root.after(0, update_animation)
+        time.sleep(1)
 
 def record_task():
-    global board, recording, data
-    if recording:
-        board_data = board.get_board_data(num_samples=window_size)
-        eeg_channels = [0, 1, 2, 3]
+    global board, recording, data, data_buffer
+    while recording:
+        try:
+            board_data = board.get_board_data(num_samples=window_size)
+            eeg_channels = [0, 1, 2, 3, 4, 5, 6, 7]
 
-        for channel in eeg_channels:
-            DataFilter.perform_bandpass(board_data[channel], sampling_rate, 7.0, 13.0, 4, FilterTypes.BUTTERWORTH, 0)
+            for channel in eeg_channels:
+                DataFilter.perform_bandpass(board_data[channel], sampling_rate, 7.0, 13.0, 4, FilterTypes.BUTTERWORTH, 0)
 
-        data.append(board_data[eeg_channels, :])
+            with data_lock:
+                data.append(board_data[eeg_channels, :])
+                for sample in board_data[eeg_channels, :].T:
+                    data_buffer.append(sample)
 
-        if show_plot:
-            update_plot(board_data[eeg_channels, :])
+            if show_plot:
+                root.after(0, update_plot)
 
-        root.after(1000, record_task)
+            time.sleep(1 / sampling_rate)
+        except Exception as e:
+            messagebox.showerror("Recording Error", f"Failed to record data: {e}")
+            print(f"Failed to record data: {e}")
 
 def stop_recording():
     global board, recording, data
     recording = False
     board.stop_stream()
     board.release_session()
-    save_data()
+    root.after(0, save_data)
     start_button.config(state=tk.NORMAL)
     stop_button.config(state=tk.DISABLED)
 
@@ -100,38 +119,46 @@ def save_data():
     if not os.path.exists(f"../data/recorded/{task}"):
         os.makedirs(f"../data/recorded/{task}")
 
-    flattened_data = np.hstack(data)
-    timestamp = datetime.now().strftime("%Y%m%d%H%M%S")
-    filename = f"../data/recorded/{task}/{task}_{timestamp}.csv"
-    pd.DataFrame(flattened_data).to_csv(filename, index=False)
-    trial_index += 1
-    saved_trials.append(f"Trial #{trial_index}: saved as {task}_{timestamp}.csv")
-    update_saved_trials()
-    data.clear()
+    with data_lock:
+        flattened_data = np.hstack(data)
+        timestamp = datetime.now().strftime("%Y%m%d%H%M%S")
+        filename = f"../data/recorded/{task}/{task}_{timestamp}.csv"
+        pd.DataFrame(flattened_data).to_csv(filename, index=False)
+        trial_index += 1
+        saved_trials.append(f"Trial #{trial_index}: saved as {task}_{timestamp}.csv")
+        update_saved_trials()
+        data.clear()
 
 def update_saved_trials():
     saved_trials_text = "\n".join(saved_trials)
     status_label.config(text=f"Saved Trials:\n{saved_trials_text}")
 
-def update_plot(board_data):
-    plt.clf()
-    for channel in range(board_data.shape[0]):
-        plt.plot(board_data[channel], label=f"Channel {channel}")
-    plt.legend(loc="upper right")
-    plt.pause(0.001)
+def update_plot():
+    global plot_fig, plot_ax
+    if plot_fig is None:
+        plt.ion()
+        plot_fig, plot_ax = plt.subplots()
+        plot_ax.set_title('Real-time EEG Data')
+        plot_ax.set_xlabel('Time')
+        plot_ax.set_ylabel('Amplitude')
+
+    plot_ax.clear()
+    data_array = np.array(data_buffer).T
+    for channel in range(data_array.shape[0]):
+        plot_ax.plot(data_array[channel], label=f"Channel {channel}")
+    plot_ax.legend(loc="upper right")
+    plot_fig.canvas.draw()
+    plot_fig.canvas.flush_events()
 
 def toggle_plot():
-    global show_plot
+    global show_plot, plot_fig
     show_plot = not show_plot
     if show_plot:
         plt.ion()
-        fig, ax = plt.subplots()
-        ax.set_title('Real-time EEG Data')
-        ax.set_xlabel('Time')
-        ax.set_ylabel('Amplitude')
         plot_button.config(text="Hide Plot")
     else:
-        plt.close(fig)
+        plt.close(plot_fig)
+        plot_fig = None
         plot_button.config(text="Show Plot")
 
 def update_animation():

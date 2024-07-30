@@ -14,6 +14,7 @@ def load_data(data_dir, segment_length=250):
             for file in os.listdir(action_dir):
                 file_path = os.path.join(action_dir, file)
                 
+                # print(f"file path: {file_path}")
                 if os.path.isfile(file_path):
                     df = pd.read_csv(file_path)
                     segment = df.values
